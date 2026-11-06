@@ -1,0 +1,65 @@
+name: Deploy landing page
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-landing
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Deploy to klikmedis.com
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # nginx caches CSS/JS for a year as immutable, so each deploy needs a new URL.
+      - name: Add version to CSS and JS links
+        run: |
+          VERSION="${GITHUB_SHA::8}"
+          sed -i -E "s#((href|src)=\"assets/(css|js)/[^\"?]+\.(css|js))\"#\1?v=${VERSION}\"#g" ./*.html
+          grep -c "?v=${VERSION}" index.html
+
+      - name: Configure SSH
+        env:
+          SSH_KEY: ${{ secrets.LANDING_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.LANDING_KNOWN_HOSTS }}
+        run: |
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/deploy_key ~/.ssh/known_hosts
+
+      # Excluded paths exist only on the server, and --delete leaves them alone.
+      # The server's rrsync key limits this to /var/www/klikmedis-landing.
+      - name: Sync files
+        env:
+          HOST: ${{ secrets.LANDING_HOST }}
+          PORT: ${{ secrets.LANDING_PORT }}
+          DEPLOY_USER: ${{ secrets.LANDING_USER }}
+        run: |
+          rsync -rltvz --delete --omit-dir-times --chmod=D755,F644 \
+            --exclude='/blog' \
+            --exclude='/favicon_io' \
+            --exclude='/robots.txt' \
+            --exclude='/harga.html' \
+            --exclude='/.git' \
+            --exclude='/.github' \
+            --exclude='/.gitignore' \
+            --exclude='/.nojekyll' \
+            --exclude='/README.md' \
+            --exclude='/Voucher Rp300.000 untuk Klinik Digital.png' \
+            --exclude='/a_vibrant_promotional_poster_for_klikmedis_clean.png' \
+            -e "ssh -i $HOME/.ssh/deploy_key -p $PORT -o BatchMode=yes" \
+            ./ "$DEPLOY_USER@$HOST:/"
+
+      - name: Remove SSH key
+        if: always()
+        run: rm -f ~/.ssh/deploy_key
